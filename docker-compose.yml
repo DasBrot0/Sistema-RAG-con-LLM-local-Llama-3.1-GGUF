@@ -1,0 +1,61 @@
+version: '3.9'
+
+services:
+  postgres_db:
+    image: ankane/pgvector:latest
+    container_name: postgres_db
+    restart: always
+    environment:
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init_pgvector.sql:/docker-entrypoint-initdb.d/init_pgvector.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  rag_app:
+    build: .
+    container_name: rag_app
+    restart: always
+    depends_on:
+      postgres_db:
+        condition: service_healthy
+    
+    environment:
+      DATABASE_URL_ASYNC: postgresql+asyncpg://${DB_USER}:${DB_PASSWORD}@postgres_db:5432/${DB_NAME}
+      DATABASE_URL_SYNC: postgresql://${DB_USER}:${DB_PASSWORD}@postgres_db:5432/${DB_NAME}
+      MODEL_PATH: /app/models/Meta-Llama-3.1-8B-Instruct-Q6_K.gguf
+
+      COLLECTION_NAME: ${COLLECTION_NAME}
+      CUDA_VISIBLE_DEVICES: 0
+      
+    ports:
+      - "8000:8000"
+      
+    command: >
+      sh -c "
+        echo 'Esperando a PostgreSQL...' &&
+        until pg_isready -h postgres_db -p 5432 -U ${DB_USER}; do sleep 2; done &&
+        echo 'PostgreSQL listo. Ejecutando ingesta inicial...' &&
+        /app/venv/bin/python initial_rag.py && 
+        echo 'Iniciando servidor RAG...' &&
+        /app/venv/bin/uvicorn backend_rag:app --host 0.0.0.0 --port 8000
+      "
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+volumes:
+  postgres_data:
